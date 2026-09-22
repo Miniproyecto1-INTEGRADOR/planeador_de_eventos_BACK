@@ -1,6 +1,13 @@
+<<<<<<< HEAD
 import uuid
 from datetime import date, datetime, time, timezone
 from typing import Any
+=======
+import os
+from fastapi import FastAPI
+from sqlalchemy import create_engine
+from fastapi.middleware.cors import CORSMiddleware
+>>>>>>> 5ed03e222f309cdabba506dcb386032d35727441
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -8,7 +15,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+<<<<<<< HEAD
 app = FastAPI(title="Planificador de eventos API")
+=======
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://planeador-de-eventos-fronted.vercel.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+>>>>>>> 5ed03e222f309cdabba506dcb386032d35727441
 
 
 @app.exception_handler(RequestValidationError)
