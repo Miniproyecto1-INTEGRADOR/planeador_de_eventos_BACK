@@ -3,6 +3,11 @@ import uuid
 from datetime import date, datetime, time, timezone
 from typing import Any
 
+try:
+    import psycopg2
+except Exception:  # pragma: no cover
+    psycopg2 = None
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +31,13 @@ app.add_middleware(
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+
+
+def _get_db_connection():
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL no configurada.")
+    return psycopg2.connect(DATABASE_URL)
 
 
 @app.exception_handler(RequestValidationError)
@@ -169,14 +181,59 @@ class SubtaskOut(BaseModel):
 
 @app.post("/api/login/")
 def login(email: str, password: str):
-    usuario = USUARIOS.get((email or "").strip().lower())
-    if not usuario or usuario["password"] != (password or ""):
+    normalized_email = (email or "").strip().lower()
+    password_value = password or ""
+
+    if DATABASE_URL:
+        try:
+            conn = _get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, email, password
+                FROM public.users
+                WHERE LOWER(email) = LOWER(%s) AND password = %s
+                LIMIT 1
+                """,
+                (normalized_email, password_value),
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+
+            if row:
+                user_id, db_email, _ = row
+                return {
+                    "token": f"demo-token-{user_id}",
+                    "user_id": str(user_id),
+                    "email": db_email,
+                }
+        except Exception:
+            pass
+
+    usuario = USUARIOS.get(normalized_email)
+    if not usuario or usuario["password"] != password_value:
         raise HTTPException(status_code=401, detail="Credenciales inválidas.")
     return {"token": f"demo-token-{usuario['id']}", "user_id": usuario["id"], "email": usuario["email"]}
 
 
 @app.get("/api/usuarios/{user_id}/limite")
 def get_daily_limit(user_id: str):
+    if DATABASE_URL:
+        try:
+            conn = _get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT daily_limit_minutes FROM public.users WHERE id = %s LIMIT 1",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row is not None:
+                return {"user_id": user_id, "daily_limit_hours": int(row[0]) // 60}
+        except Exception:
+            pass
     return {"user_id": user_id, "daily_limit_hours": DAILY_LIMITS.get(user_id, 6)}
 
 
@@ -184,6 +241,20 @@ def get_daily_limit(user_id: str):
 def set_daily_limit(user_id: str, value: int):
     if value < 1 or value > 16:
         raise HTTPException(status_code=400, detail="El límite diario debe estar entre 1 y 16 horas.")
+    if DATABASE_URL:
+        try:
+            conn = _get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE public.users SET daily_limit_minutes = %s WHERE id = %s",
+                (value * 60, user_id),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"user_id": user_id, "daily_limit_hours": value}
+        except Exception:
+            pass
     DAILY_LIMITS[user_id] = value
     return {"user_id": user_id, "daily_limit_hours": value}
 
@@ -301,7 +372,7 @@ def delete_event(event_id: str):
     if not evento:
         raise HTTPException(status_code=404, detail=EVENT_NOT_FOUND)
 
-    for subtask_id, subtask in list(SUBTAREAS.items()):
+    for subtask_id, subtask in SUBTAREAS.items():
         if subtask.get("event_id") == event_id:
             del SUBTAREAS[subtask_id]
 
