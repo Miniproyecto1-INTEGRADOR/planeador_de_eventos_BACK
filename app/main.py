@@ -19,6 +19,14 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://cqhgezigsatbkujljehu.supabase.co").rstrip("/")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_ACCESS_TOKEN = ContextVar("supabase_access_token", default=None)
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "https://planeador-de-eventos-fronted.vercel.app,http://localhost:5173,http://localhost:5175",
+    ).split(",")
+    if origin.strip()
+]
 
 app = FastAPI(
     title="Planificador de eventos API",
@@ -29,7 +37,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
