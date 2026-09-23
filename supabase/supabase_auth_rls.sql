@@ -106,4 +106,4 @@ drop policy if exists subtasks_delete_own on public.subtasks;
 create policy subtasks_delete_own on public.subtasks
 for delete to authenticated using (
   exists (select 1 from public.events e where e.id = subtasks.event_id and e.user_id::text = (select auth.uid())::text)
-);\n
+);

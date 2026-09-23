@@ -23,6 +23,8 @@ CORS_ORIGINS = list(dict.fromkeys([
     "https://planeador-de-eventos-fronted.vercel.app",
     "http://localhost:5173",
     "http://localhost:5175",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5175",
     *[
         origin.strip()
         for origin in os.getenv("CORS_ORIGINS", "").split(",")
