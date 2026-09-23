@@ -216,6 +216,16 @@ class SubtaskCreate(BaseModel):
     status: str = "pending"
 
 
+class EventPlanCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(..., min_length=1)
+    event_type: str = Field(..., min_length=1)
+    event_date: datetime
+    color: str | None = None
+    user_id: str | None = None
+    subtasks: list[SubtaskCreate] = Field(..., min_length=1)
+
+
 class SubtaskUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str | None = None
@@ -383,6 +393,37 @@ def get_event_progress(event_id: str):
 @app.post("/api/eventos/", response_model=EventOut, status_code=201)
 def create_evento(evento: EventCreate):
     return _insert_row("events", _create_event_payload(evento))
+
+
+@app.post("/api/eventos/plan-inicial/", status_code=201)
+def create_event_plan(plan: EventPlanCreate):
+    event = _insert_row("events", _create_event_payload(EventCreate(**plan.model_dump(exclude={"subtasks"}))))
+    created_subtasks = []
+
+    try:
+        for subtask in plan.subtasks:
+            title = subtask.title.strip()
+            if not title:
+                raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")
+            created_subtasks.append(_insert_row("subtasks", {
+                "id": str(uuid.uuid4()),
+                "event_id": event["id"],
+                "task_id": None,
+                "title": title,
+                "description": subtask.description,
+                "target_date": subtask.target_date,
+                "estimated_minutes": subtask.estimated_minutes,
+                "status": _normalize_status(subtask.status),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }))
+    except Exception as exc:
+        _delete_rows("subtasks", {"event_id": f"eq.{event['id']}"})
+        _delete_rows("events", {"id": f"eq.{event['id']}"})
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=502, detail="No se pudo guardar el plan logístico completo.") from exc
+
+    return {"event": event, "subtasks": created_subtasks}
 
 
 @app.patch("/api/eventos/{event_id}", response_model=EventOut)
