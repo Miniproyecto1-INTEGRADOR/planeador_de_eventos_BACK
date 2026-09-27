@@ -1,5 +1,8 @@
+from datetime import date, timedelta
+
 from fastapi.testclient import TestClient
 
+import app.main as api_module
 from app.main import app
 
 
@@ -142,3 +145,53 @@ def test_delete_event_removes_subtasks():
 
     list_subtasks = client.get(f"/api/eventos/{event['id']}/subtareas/")
     assert list_subtasks.status_code == 404
+
+
+def test_today_filters_and_orders_subtasks_without_database(monkeypatch):
+    today = date.today()
+    event_id = '550e8400-e29b-41d4-a716-446655440000'
+    captured = {}
+    rows = [
+        {'id': 'late-overdue', 'title': 'Vencida reciente', 'target_date': (today - timedelta(days=1)).isoformat(), 'estimated_minutes': 15},
+        {'id': 'far-overdue', 'title': 'Vencida antigua', 'target_date': (today - timedelta(days=4)).isoformat(), 'estimated_minutes': 60},
+        {'id': 'today-long', 'title': 'Tarea larga', 'target_date': today.isoformat(), 'estimated_minutes': 90},
+        {'id': 'today-short', 'title': 'Tarea corta', 'target_date': today.isoformat(), 'estimated_minutes': 30},
+        {'id': 'upcoming', 'title': 'Próxima', 'target_date': (today + timedelta(days=1)).isoformat(), 'estimated_minutes': 20},
+        {'id': 'undated', 'title': 'Sin fecha', 'target_date': None, 'estimated_minutes': 10},
+    ]
+
+    def fake_get_rows(table, filters=None, select='*'):
+        captured['table'] = table
+        captured['filters'] = filters
+        return rows
+
+    monkeypatch.setattr(api_module, '_get_rows', fake_get_rows)
+
+    response = client.get('/api/hoy/', params={'event_id': event_id, 'status': 'pending'})
+
+    assert response.status_code == 200
+    assert captured == {
+        'table': 'subtasks',
+        'filters': {'status': 'eq.pending', 'event_id': f'eq.{event_id}'},
+    }
+    payload = response.json()
+    assert [item['id'] for item in payload['vencidas']] == ['far-overdue', 'late-overdue']
+    assert [item['id'] for item in payload['hoy']] == ['today-short', 'today-long']
+    assert [item['id'] for item in payload['proximas']] == ['upcoming', 'undated']
+
+
+def test_today_defaults_to_excluding_completed_and_rejects_unknown_status(monkeypatch):
+    captured = {}
+
+    def fake_get_rows(table, filters=None, select='*'):
+        captured['filters'] = filters
+        return []
+
+    monkeypatch.setattr(api_module, '_get_rows', fake_get_rows)
+
+    response = client.get('/api/hoy/')
+    assert response.status_code == 200
+    assert captured['filters'] == {'status': 'neq.done'}
+
+    invalid_response = client.get('/api/hoy/', params={'status': 'unknown'})
+    assert invalid_response.status_code == 400

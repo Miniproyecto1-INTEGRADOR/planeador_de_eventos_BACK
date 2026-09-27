@@ -6,10 +6,11 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Literal
+from uuid import UUID
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -352,9 +353,50 @@ def health_check():
     }
 
 
-@app.get("/api/hoy/")
-def today_summary():
-    all_subtasks = _get_rows("subtasks", {"status": "neq.done"})
+@app.get(
+    "/api/hoy/",
+    summary="Consultar gestiones agrupadas para Hoy",
+    description=(
+        "Devuelve gestiones agrupadas en vencidas, hoy y próximas. Requiere el token de acceso "
+        "de Supabase en `Authorization: Bearer <token>`. Si se omite `status`, no incluye "
+        "gestiones completadas. Ejemplo: `/api/hoy/?event_id=550e8400-e29b-41d4-a716-446655440000&status=pending`."
+    ),
+    responses={
+        200: {
+            "description": "Gestiones ordenadas por fecha límite y luego por esfuerzo estimado.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "vencidas": [],
+                        "hoy": [
+                            {
+                                "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                                "event_id": "550e8400-e29b-41d4-a716-446655440000",
+                                "title": "Confirmar catering",
+                                "target_date": "2026-09-27",
+                                "estimated_minutes": 45,
+                                "status": "pending",
+                            }
+                        ],
+                        "proximas": [],
+                    }
+                }
+            },
+        },
+        400: {"description": "El UUID del evento o el estado no es válido."},
+    },
+)
+def today_summary(
+    event_id: UUID | None = Query(default=None, description="Limita el resultado a un evento propio."),
+    status: Literal["pending", "done", "postponed"] | None = Query(
+        default=None,
+        description="Filtra por estado. Si se omite, excluye las gestiones completadas.",
+    ),
+):
+    filters = {"status": f"eq.{status}" if status else "neq.done"}
+    if event_id is not None:
+        filters["event_id"] = f"eq.{event_id}"
+    all_subtasks = _get_rows("subtasks", filters)
     today = date.today()
     groups: dict[str, list[dict[str, Any]]] = {"vencidas": [], "hoy": [], "proximas": []}
     for item in all_subtasks:
