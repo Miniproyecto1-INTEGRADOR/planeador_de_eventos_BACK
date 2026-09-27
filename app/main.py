@@ -187,6 +187,18 @@ def _coerce_date(value: str | date | datetime | None) -> date | None:
         raise HTTPException(status_code=400, detail="La fecha no tiene un formato válido.") from exc
 
 
+def _validate_subtask_date(target_date: str | date | datetime | None, event_date: str | date | datetime) -> date:
+    target_day = _coerce_date(target_date)
+    event_day = _coerce_date(event_date)
+    if target_day is None:
+        raise HTTPException(status_code=400, detail="La fecha límite de la subtarea es obligatoria.")
+    if event_day is None:
+        raise HTTPException(status_code=400, detail="La fecha del evento no es válida.")
+    if target_day > event_day:
+        raise HTTPException(status_code=400, detail="La fecha límite de una subtarea no puede ser posterior a la fecha del evento.")
+    return target_day
+
+
 def _normalize_status(value: str | None) -> str:
     status = (value or "pending").strip().lower()
     if status not in VALID_STATUSES:
@@ -451,6 +463,7 @@ def create_event_plan(plan: EventPlanCreate):
             title = subtask.title.strip()
             if not title:
                 raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")
+            _validate_subtask_date(subtask.target_date, event["event_date"])
             created_subtasks.append(_insert_row("subtasks", {
                 "id": str(uuid.uuid4()),
                 "event_id": event["id"],
@@ -499,8 +512,10 @@ def delete_event(event_id: str):
 
 @app.post("/api/eventos/{event_id}/subtareas/", response_model=SubtaskOut, status_code=201)
 def create_subtask(event_id: str, subtask: SubtaskCreate):
-    if not _get_row("events", {"id": f"eq.{event_id}"}, "id"):
+    event = _get_row("events", {"id": f"eq.{event_id}"}, "id,event_date")
+    if not event:
         raise HTTPException(status_code=404, detail=EVENT_NOT_FOUND)
+    _validate_subtask_date(subtask.target_date, event["event_date"])
     title = subtask.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")

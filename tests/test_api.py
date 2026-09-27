@@ -76,6 +76,64 @@ def test_create_subtask_rejects_invalid_duration():
     assert response.status_code == 400
 
 
+def test_create_subtask_rejects_missing_or_later_target_date(monkeypatch):
+    event_id = '550e8400-e29b-41d4-a716-446655440000'
+    inserted_rows = []
+    monkeypatch.setattr(
+        api_module,
+        '_get_row',
+        lambda table, filters, select='*': {'id': event_id, 'event_date': '2026-10-18T18:00:00'},
+    )
+    monkeypatch.setattr(api_module, '_insert_row', lambda table, payload: inserted_rows.append(payload))
+
+    base_payload = {
+        'title': 'Confirmar catering',
+        'estimated_minutes': 60,
+        'status': 'pending',
+    }
+    future_response = client.post(
+        f'/api/eventos/{event_id}/subtareas/',
+        json={**base_payload, 'target_date': '2026-10-19'},
+    )
+    missing_response = client.post(f'/api/eventos/{event_id}/subtareas/', json=base_payload)
+
+    assert future_response.status_code == 400
+    assert 'posterior a la fecha del evento' in future_response.json()['detail']
+    assert missing_response.status_code == 400
+    assert inserted_rows == []
+
+
+def test_initial_plan_rolls_back_when_subtask_is_after_event(monkeypatch):
+    inserted_events = []
+    deleted_rows = []
+
+    def fake_insert_row(table, payload):
+        if table == 'events':
+            inserted_events.append(payload)
+        return payload
+
+    monkeypatch.setattr(api_module, '_insert_row', fake_insert_row)
+    monkeypatch.setattr(api_module, '_delete_rows', lambda table, filters: deleted_rows.append(table) or [])
+
+    response = client.post(
+        '/api/eventos/plan-inicial/',
+        json={
+            'name': 'Evento de prueba',
+            'event_type': 'Boda',
+            'event_date': '2026-10-18T18:00:00',
+            'subtasks': [{
+                'title': 'Confirmar catering',
+                'target_date': '2026-10-19',
+                'estimated_minutes': 60,
+            }],
+        },
+    )
+
+    assert response.status_code == 400
+    assert inserted_events
+    assert deleted_rows == ['subtasks', 'events']
+
+
 def test_event_cycle_and_today_grouping():
     event_response = client.post(
         '/api/eventos/',
