@@ -19,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://cqhgezigsatbkujljehu.supabase.co").rstrip("/")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 SUPABASE_ACCESS_TOKEN = ContextVar("supabase_access_token", default=None)
 CORS_ORIGINS = list(dict.fromkeys([
     "https://planeador-de-eventos-fronted.vercel.app",
@@ -159,10 +161,55 @@ def _supabase_auth_request(path: str, payload: dict[str, Any]) -> dict[str, Any]
             detail = error_body.get("msg") or error_body.get("message") or error_body.get("error_description") or "Supabase Auth rechazó la solicitud."
         except Exception:
             detail = "Supabase Auth rechazó la solicitud."
+        normalized = detail.lower()
+        if (
+            "already registered" in normalized or
+            "already exists" in normalized or
+            "duplicate" in normalized or
+            "email is already" in normalized or
+            "user with this email" in normalized
+        ):
+            raise HTTPException(status_code=409, detail="El correo electrónico ya está registrado. Inténtalo con otro correo.") from exc
         status = 401 if exc.code in (400, 401) and "credential" in detail.lower() else exc.code
         raise HTTPException(status_code=status, detail=detail) from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise HTTPException(status_code=503, detail="No fue posible contactar Supabase Auth.") from exc
+
+
+def _email_exists_in_supabase(email: str) -> bool:
+    if SUPABASE_SERVICE_ROLE_KEY:
+        encoded_email = urllib.parse.quote(email)
+        url = f"{SUPABASE_URL}/auth/v1/admin/users?email={encoded_email}"
+        request = urllib.request.Request(
+            url,
+            method="GET",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                users = payload.get("users") or []
+                return any((user.get("email") or "").strip().lower() == email for user in users)
+        except urllib.error.HTTPError:
+            return False
+        except (urllib.error.URLError, TimeoutError):
+            return False
+
+    if not DATABASE_URL:
+        return False
+
+    try:
+        import psycopg2
+        with psycopg2.connect(DATABASE_URL) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM auth.users WHERE email = %s LIMIT 1;", (email,))
+                return cursor.fetchone() is not None
+    except Exception:
+        return False
 
 
 @app.exception_handler(RequestValidationError)
@@ -322,6 +369,8 @@ def register_user(user: UserCreate):
     email = user.email.strip().lower()
     if "@" not in email or email.startswith("@") or email.endswith("@"):
         raise HTTPException(status_code=400, detail="Ingresa un correo válido.")
+    if _email_exists_in_supabase(email):
+        raise HTTPException(status_code=409, detail="El correo electrónico ya está registrado. Inténtalo con otro correo.")
     response = _supabase_auth_request(
         "/auth/v1/signup",
         {
