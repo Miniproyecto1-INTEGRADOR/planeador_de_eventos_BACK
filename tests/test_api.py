@@ -144,6 +144,41 @@ def test_create_subtask_rejects_missing_or_later_target_date(monkeypatch):
     assert inserted_rows == []
 
 
+def test_create_subtask_rejects_daily_capacity_without_inserting(monkeypatch):
+    event_id = '550e8400-e29b-41d4-a716-446655440000'
+    inserted_rows = []
+
+    def fake_get_row(table, filters, select='*'):
+        if table == 'events':
+            return {'id': event_id, 'event_date': '2026-11-05T18:00:00', 'user_id': '11111111-1111-1111-1111-111111111111'}
+        if table == 'users':
+            return {'daily_limit_minutes': 360}
+        return None
+
+    monkeypatch.setattr(api_module, '_get_row', fake_get_row)
+    monkeypatch.setattr(
+        api_module,
+        '_get_rows',
+        lambda *args, **kwargs: [{'id': 'existing-task', 'estimated_minutes': 300}],
+    )
+    monkeypatch.setattr(api_module, '_insert_row', lambda table, payload: inserted_rows.append(payload))
+
+    response = client.post(
+        f'/api/eventos/{event_id}/subtareas/',
+        json={
+            'title': 'Añadir gestión de siete horas',
+            'target_date': '2026-10-20',
+            'estimated_minutes': 420,
+            'status': 'pending',
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()['detail']['planned_minutes'] == 720
+    assert response.json()['detail']['limit_minutes'] == 360
+    assert inserted_rows == []
+
+
 def test_initial_plan_rolls_back_when_subtask_is_after_event(monkeypatch):
     inserted_events = []
     deleted_rows = []
@@ -172,6 +207,47 @@ def test_initial_plan_rolls_back_when_subtask_is_after_event(monkeypatch):
 
     assert response.status_code == 400
     assert inserted_events
+    assert deleted_rows == ['subtasks', 'events']
+
+
+def test_initial_plan_returns_conflicting_subtask_and_rolls_back(monkeypatch):
+    inserted_rows = []
+    deleted_rows = []
+
+    def fake_insert_row(table, payload):
+        inserted_rows.append((table, payload))
+        return payload
+
+    monkeypatch.setattr(api_module, '_insert_row', fake_insert_row)
+    monkeypatch.setattr(api_module, '_delete_rows', lambda table, filters: deleted_rows.append(table) or [])
+    monkeypatch.setattr(api_module, '_get_row', lambda table, filters, select='*': {'daily_limit_minutes': 360})
+    monkeypatch.setattr(
+        api_module,
+        '_get_rows',
+        lambda *args, **kwargs: [{'id': 'existing-task', 'estimated_minutes': 300}],
+    )
+
+    response = client.post(
+        '/api/eventos/plan-inicial/',
+        json={
+            'name': 'Plan con conflicto',
+            'event_type': 'Boda',
+            'event_date': '2026-11-05T18:00:00',
+            'user_id': '11111111-1111-1111-1111-111111111111',
+            'subtasks': [{
+                'title': 'Buscar proveedores',
+                'target_date': '2026-10-20',
+                'estimated_minutes': 120,
+            }],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()['detail']['planned_minutes'] == 420
+    assert response.json()['detail']['limit_minutes'] == 360
+    assert response.json()['detail']['subtask_index'] == 0
+    assert response.json()['detail']['subtask_title'] == 'Buscar proveedores'
+    assert [table for table, _ in inserted_rows] == ['events']
     assert deleted_rows == ['subtasks', 'events']
 
 

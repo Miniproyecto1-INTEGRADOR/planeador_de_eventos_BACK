@@ -206,6 +206,35 @@ def _normalize_status(value: str | None) -> str:
     return status
 
 
+def _daily_capacity_conflict(
+    user_id: str | None,
+    target_day: date,
+    estimated_minutes: int,
+    subtask_id: str,
+) -> dict[str, Any] | None:
+    profile = _get_row("users", {"id": f"eq.{user_id}"}, "daily_limit_minutes") if user_id else None
+    limit_minutes = 360 if profile is None or profile.get("daily_limit_minutes") is None else int(profile["daily_limit_minutes"])
+    tasks_for_day = _get_rows(
+        "subtasks",
+        {"target_date": f"eq.{target_day.isoformat()}", "status": "neq.done"},
+        "id,estimated_minutes",
+    )
+    planned_minutes = sum(
+        int(item.get("estimated_minutes") or 0)
+        for item in tasks_for_day
+        if str(item.get("id")) != subtask_id
+    ) + int(estimated_minutes or 0)
+    if planned_minutes <= limit_minutes:
+        return None
+    return {
+        "code": "daily_capacity_exceeded",
+        "target_date": target_day.isoformat(),
+        "planned_minutes": planned_minutes,
+        "limit_minutes": limit_minutes,
+        "subtask_id": subtask_id,
+    }
+
+
 class EventCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(..., min_length=1)
@@ -485,20 +514,33 @@ def create_event_plan(plan: EventPlanCreate):
     created_subtasks = []
 
     try:
-        for subtask in plan.subtasks:
+        for subtask_index, subtask in enumerate(plan.subtasks):
             title = subtask.title.strip()
             if not title:
                 raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")
-            _validate_subtask_date(subtask.target_date, event["event_date"])
+            target_day = _validate_subtask_date(subtask.target_date, event["event_date"])
+            status = _normalize_status(subtask.status)
+            subtask_id = str(uuid.uuid4())
+            if status != "done":
+                conflict = _daily_capacity_conflict(
+                    event.get("user_id"),
+                    target_day,
+                    subtask.estimated_minutes,
+                    subtask_id,
+                )
+                if conflict:
+                    conflict["subtask_index"] = subtask_index
+                    conflict["subtask_title"] = title
+                    raise HTTPException(status_code=409, detail=conflict)
             created_subtasks.append(_insert_row("subtasks", {
-                "id": str(uuid.uuid4()),
+                "id": subtask_id,
                 "event_id": event["id"],
                 "task_id": None,
                 "title": title,
                 "description": subtask.description,
-                "target_date": subtask.target_date,
+                "target_date": target_day.isoformat(),
                 "estimated_minutes": subtask.estimated_minutes,
-                "status": _normalize_status(subtask.status),
+                "status": status,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }))
     except Exception as exc:
@@ -549,24 +591,60 @@ def delete_event(event_id: str):
     return {"message": "Evento eliminado correctamente.", "event_id": event_id}
 
 
-@app.post("/api/eventos/{event_id}/subtareas/", response_model=SubtaskOut, status_code=201)
+@app.post(
+    "/api/eventos/{event_id}/subtareas/",
+    response_model=SubtaskOut,
+    status_code=201,
+    summary="Crear una gestión logística",
+    description="Crea una gestión si su carga diaria no supera el límite del organizador; el límite predeterminado es 6 horas.",
+    responses={
+        400: {"description": "La fecha supera la del evento o los datos son inválidos."},
+        409: {
+            "description": "La nueva gestión excedería el límite diario; no se insertó.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "code": "daily_capacity_exceeded",
+                            "target_date": "2026-10-20",
+                            "planned_minutes": 420,
+                            "limit_minutes": 360,
+                            "subtask_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                        }
+                    }
+                }
+            },
+        },
+    },
+)
 def create_subtask(event_id: str, subtask: SubtaskCreate):
-    event = _get_row("events", {"id": f"eq.{event_id}"}, "id,event_date")
+    event = _get_row("events", {"id": f"eq.{event_id}"}, "id,event_date,user_id")
     if not event:
         raise HTTPException(status_code=404, detail=EVENT_NOT_FOUND)
-    _validate_subtask_date(subtask.target_date, event["event_date"])
+    target_day = _validate_subtask_date(subtask.target_date, event["event_date"])
     title = subtask.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")
+    status = _normalize_status(subtask.status)
+    subtask_id = str(uuid.uuid4())
+    if status != "done":
+        conflict = _daily_capacity_conflict(
+            event.get("user_id"),
+            target_day,
+            subtask.estimated_minutes,
+            subtask_id,
+        )
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
     payload = {
-        "id": str(uuid.uuid4()),
+        "id": subtask_id,
         "event_id": event_id,
         "task_id": None,
         "title": title,
         "description": subtask.description,
-        "target_date": subtask.target_date,
+        "target_date": target_day.isoformat(),
         "estimated_minutes": subtask.estimated_minutes,
-        "status": _normalize_status(subtask.status),
+        "status": status,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     return _insert_row("subtasks", payload)
@@ -633,33 +711,14 @@ def update_subtask(event_id: str, subtask_id: str, changes: SubtaskUpdate):
     status = data.get("status", current.get("status", "pending"))
     schedule_changed = any(field in data for field in ("target_date", "estimated_minutes", "status"))
     if schedule_changed and target_day is not None and status != "done":
-        profile = _get_row(
-            "users",
-            {"id": f"eq.{event.get('user_id')}"},
-            "daily_limit_minutes",
-        ) if event.get("user_id") else None
-        limit_minutes = 360 if profile is None or profile.get("daily_limit_minutes") is None else int(profile["daily_limit_minutes"])
-        tasks_for_day = _get_rows(
-            "subtasks",
-            {"target_date": f"eq.{target_day.isoformat()}", "status": "neq.done"},
-            "id,estimated_minutes",
+        conflict = _daily_capacity_conflict(
+            event.get("user_id"),
+            target_day,
+            estimated_minutes,
+            subtask_id,
         )
-        planned_minutes = sum(
-            int(item.get("estimated_minutes") or 0)
-            for item in tasks_for_day
-            if str(item.get("id")) != subtask_id
-        ) + int(estimated_minutes or 0)
-        if planned_minutes > limit_minutes:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "daily_capacity_exceeded",
-                    "target_date": target_day.isoformat(),
-                    "planned_minutes": planned_minutes,
-                    "limit_minutes": limit_minutes,
-                    "subtask_id": subtask_id,
-                },
-            )
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
 
     updated = _update_row("subtasks", {"id": f"eq.{subtask_id}", "event_id": f"eq.{event_id}"}, data) if data else None
     return updated or current
