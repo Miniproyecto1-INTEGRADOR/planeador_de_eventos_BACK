@@ -16,6 +16,47 @@ def test_health_endpoint():
     assert payload['status'] in {'ok', 'degraded'}
 
 
+def test_daily_limit_defaults_to_six_hours(monkeypatch):
+    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: None)
+
+    response = client.get('/api/usuarios/11111111-1111-1111-1111-111111111111/limite')
+
+    assert response.status_code == 200
+    assert response.json()['daily_limit_hours'] == 6
+
+
+def test_daily_limit_update_persists_minutes_and_rejects_out_of_range(monkeypatch):
+    updates = []
+
+    def fake_update_row(table, filters, payload):
+        updates.append((table, filters, payload))
+        return payload
+
+    monkeypatch.setattr(api_module, '_update_row', fake_update_row)
+
+    response = client.put('/api/usuarios/11111111-1111-1111-1111-111111111111/limite', params={'value': 4})
+    low_response = client.put('/api/usuarios/11111111-1111-1111-1111-111111111111/limite', params={'value': 0})
+    high_response = client.put('/api/usuarios/11111111-1111-1111-1111-111111111111/limite', params={'value': 17})
+
+    assert response.status_code == 200
+    assert response.json()['daily_limit_hours'] == 4
+    assert updates == [(
+        'users',
+        {'id': 'eq.11111111-1111-1111-1111-111111111111', 'select': 'id,daily_limit_minutes'},
+        {'daily_limit_minutes': 240},
+    )]
+    assert low_response.status_code == 400
+    assert high_response.status_code == 400
+
+
+def test_daily_limit_update_reports_missing_profile(monkeypatch):
+    monkeypatch.setattr(api_module, '_update_row', lambda *args, **kwargs: None)
+
+    response = client.put('/api/usuarios/11111111-1111-1111-1111-111111111111/limite', params={'value': 4})
+
+    assert response.status_code == 404
+
+
 def test_create_event_and_subtasks():
     event_response = client.post(
         '/api/eventos/',
@@ -132,6 +173,95 @@ def test_initial_plan_rolls_back_when_subtask_is_after_event(monkeypatch):
     assert response.status_code == 400
     assert inserted_events
     assert deleted_rows == ['subtasks', 'events']
+
+
+def test_reprogram_subtask_rejects_dates_after_event_and_detects_capacity(monkeypatch):
+    event_id = '550e8400-e29b-41d4-a716-446655440000'
+    subtask_id = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
+    current = {
+        'id': subtask_id,
+        'event_id': event_id,
+        'title': 'Buscar proveedores',
+        'target_date': '2026-10-18',
+        'estimated_minutes': 60,
+        'status': 'pending',
+        'created_at': '2026-10-01T00:00:00+00:00',
+    }
+    updated_rows = []
+    queried_rows = []
+
+    def fake_get_row(table, filters, select='*'):
+        if table == 'subtasks':
+            return current
+        if table == 'events':
+            return {'id': event_id, 'event_date': '2026-11-05T18:00:00', 'user_id': '11111111-1111-1111-1111-111111111111'}
+        if table == 'users':
+            return {'daily_limit_minutes': 360}
+        return None
+
+    def fake_get_rows(table, filters=None, select='*'):
+        queried_rows.append((table, filters, select))
+        return [{'id': 'other-task', 'estimated_minutes': 300}]
+
+    def fake_update_row(table, filters, payload):
+        updated_rows.append(payload)
+        return {**current, **payload}
+
+    monkeypatch.setattr(api_module, '_get_row', fake_get_row)
+    monkeypatch.setattr(api_module, '_get_rows', fake_get_rows)
+    monkeypatch.setattr(api_module, '_update_row', fake_update_row)
+
+    conflict_response = client.patch(
+        f'/api/eventos/{event_id}/subtareas/{subtask_id}',
+        json={'target_date': '2026-10-20', 'estimated_minutes': 120},
+    )
+    success_response = client.patch(
+        f'/api/eventos/{event_id}/subtareas/{subtask_id}',
+        json={'target_date': '2026-10-20', 'estimated_minutes': 60},
+    )
+    invalid_date_response = client.patch(
+        f'/api/eventos/{event_id}/subtareas/{subtask_id}',
+        json={'target_date': '2026-11-06'},
+    )
+
+    assert conflict_response.status_code == 409
+    assert conflict_response.json()['detail'] == {
+        'code': 'daily_capacity_exceeded',
+        'target_date': '2026-10-20',
+        'planned_minutes': 420,
+        'limit_minutes': 360,
+        'subtask_id': subtask_id,
+    }
+    assert success_response.status_code == 200
+    assert success_response.json()['target_date'] == '2026-10-20'
+    assert invalid_date_response.status_code == 400
+    assert len(updated_rows) == 1
+    assert queried_rows
+
+
+def test_event_date_cannot_move_before_existing_subtask_deadline(monkeypatch):
+    event_id = '550e8400-e29b-41d4-a716-446655440000'
+    updates = []
+    monkeypatch.setattr(
+        api_module,
+        '_get_row',
+        lambda table, filters, select='*': {'id': event_id, 'event_date': '2026-11-05T18:00:00'},
+    )
+    monkeypatch.setattr(
+        api_module,
+        '_get_rows',
+        lambda *args, **kwargs: [{'id': 'task-1', 'target_date': '2026-10-20'}],
+    )
+    monkeypatch.setattr(api_module, '_update_row', lambda *args, **kwargs: updates.append(args) or {})
+
+    response = client.patch(
+        f'/api/eventos/{event_id}',
+        json={'event_date': '2026-10-15T18:00:00'},
+    )
+
+    assert response.status_code == 400
+    assert 'fecha límite de una gestión existente' in response.json()['detail']
+    assert updates == []
 
 
 def test_event_cycle_and_today_grouping():

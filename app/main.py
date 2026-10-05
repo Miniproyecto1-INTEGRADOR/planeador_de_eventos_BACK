@@ -339,18 +339,46 @@ def register_user(user: UserCreate):
     }
 
 
-@app.get("/api/usuarios/{user_id}/limite")
+@app.get(
+    "/api/usuarios/{user_id}/limite",
+    summary="Consultar el límite diario de gestión",
+    description="Devuelve las horas del organizador autenticado. Si no configuró un valor, devuelve el valor predeterminado de 6 horas.",
+    responses={
+        200: {
+            "description": "Límite actual del organizador.",
+            "content": {"application/json": {"example": {"user_id": "550e8400-e29b-41d4-a716-446655440000", "daily_limit_hours": 6}}},
+        },
+    },
+)
 def get_daily_limit(user_id: str):
     row = _get_row("users", {"id": f"eq.{user_id}"}, "daily_limit_minutes")
     minutes = 360 if row is None or row.get("daily_limit_minutes") is None else int(row["daily_limit_minutes"])
     return {"user_id": user_id, "daily_limit_hours": minutes // 60}
 
 
-@app.put("/api/usuarios/{user_id}/limite")
+@app.put(
+    "/api/usuarios/{user_id}/limite",
+    summary="Actualizar el límite diario de gestión",
+    description="Guarda el límite por organizador. El valor `value` se envía como query parameter y debe ser un entero entre 1 y 16.",
+    responses={
+        200: {
+            "description": "Límite guardado.",
+            "content": {"application/json": {"example": {"user_id": "550e8400-e29b-41d4-a716-446655440000", "daily_limit_hours": 4}}},
+        },
+        400: {"description": "El valor está fuera del rango permitido de 1 a 16 horas."},
+        404: {"description": "No existe un perfil visible para el organizador."},
+    },
+)
 def set_daily_limit(user_id: str, value: int):
     if value < 1 or value > 16:
         raise HTTPException(status_code=400, detail="El límite diario debe estar entre 1 y 16 horas.")
-    _update_row("users", {"id": f"eq.{user_id}"}, {"daily_limit_minutes": value * 60})
+    updated = _update_row(
+        "users",
+        {"id": f"eq.{user_id}", "select": "id,daily_limit_minutes"},
+        {"daily_limit_minutes": value * 60},
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="No encontramos el perfil del organizador para guardar el límite.")
     return {"user_id": user_id, "daily_limit_hours": value}
 
 
@@ -494,6 +522,19 @@ def update_event(event_id: str, changes: EventUpdate):
             data[field] = (data[field] or "").strip()
             if not data[field]:
                 raise HTTPException(status_code=400, detail=f"{field} es obligatorio.")
+    if "event_date" in data:
+        if data["event_date"] is None:
+            raise HTTPException(status_code=400, detail="La fecha del evento es obligatoria.")
+        event_day = _coerce_date(data["event_date"])
+        subtasks = _get_rows("subtasks", {"event_id": f"eq.{event_id}"}, "id,target_date")
+        if any(
+            (target_day := _coerce_date(subtask.get("target_date"))) is not None and target_day > event_day
+            for subtask in subtasks
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="La nueva fecha del evento no puede quedar antes de la fecha límite de una gestión existente.",
+            )
     updated = _update_row("events", {"id": f"eq.{event_id}"}, data) if data else None
     return updated or current
 
@@ -538,11 +579,41 @@ def list_subtasks(event_id: str):
     return _get_rows("subtasks", {"event_id": f"eq.{event_id}", "order": "target_date.asc.nullsfirst"})
 
 
-@app.patch("/api/eventos/{event_id}/subtareas/{subtask_id}", response_model=SubtaskOut)
+@app.patch(
+    "/api/eventos/{event_id}/subtareas/{subtask_id}",
+    response_model=SubtaskOut,
+    summary="Actualizar o reprogramar una gestión",
+    description=(
+        "Permite cambiar la fecha límite y/o duración estimada. La fecha no puede superar la fecha del evento. "
+        "Si la carga del organizador excede su límite diario, responde 409 con el total y el límite, sin guardar."
+    ),
+    responses={
+        400: {"description": "La fecha es posterior al evento o la duración no es válida."},
+        409: {
+            "description": "La reprogramación sobrecargaría el día; no se guardaron cambios.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "code": "daily_capacity_exceeded",
+                            "target_date": "2026-10-20",
+                            "planned_minutes": 420,
+                            "limit_minutes": 360,
+                            "subtask_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                        }
+                    }
+                }
+            },
+        },
+    },
+)
 def update_subtask(event_id: str, subtask_id: str, changes: SubtaskUpdate):
     current = _get_row("subtasks", {"id": f"eq.{subtask_id}", "event_id": f"eq.{event_id}"})
     if not current:
         raise HTTPException(status_code=404, detail="Subtarea no encontrada.")
+    event = _get_row("events", {"id": f"eq.{event_id}"}, "id,event_date,user_id")
+    if not event:
+        raise HTTPException(status_code=404, detail=EVENT_NOT_FOUND)
     data = changes.model_dump(exclude_unset=True)
     if "title" in data:
         data["title"] = (data["title"] or "").strip()
@@ -552,6 +623,44 @@ def update_subtask(event_id: str, subtask_id: str, changes: SubtaskUpdate):
         raise HTTPException(status_code=400, detail="Los minutos estimados deben ser mayores que 0.")
     if "status" in data:
         data["status"] = _normalize_status(data["status"])
+
+    target_day = _coerce_date(data.get("target_date", current.get("target_date")))
+    if "target_date" in data:
+        target_day = _validate_subtask_date(data["target_date"], event["event_date"])
+        data["target_date"] = target_day.isoformat()
+
+    estimated_minutes = data.get("estimated_minutes", current.get("estimated_minutes"))
+    status = data.get("status", current.get("status", "pending"))
+    schedule_changed = any(field in data for field in ("target_date", "estimated_minutes", "status"))
+    if schedule_changed and target_day is not None and status != "done":
+        profile = _get_row(
+            "users",
+            {"id": f"eq.{event.get('user_id')}"},
+            "daily_limit_minutes",
+        ) if event.get("user_id") else None
+        limit_minutes = 360 if profile is None or profile.get("daily_limit_minutes") is None else int(profile["daily_limit_minutes"])
+        tasks_for_day = _get_rows(
+            "subtasks",
+            {"target_date": f"eq.{target_day.isoformat()}", "status": "neq.done"},
+            "id,estimated_minutes",
+        )
+        planned_minutes = sum(
+            int(item.get("estimated_minutes") or 0)
+            for item in tasks_for_day
+            if str(item.get("id")) != subtask_id
+        ) + int(estimated_minutes or 0)
+        if planned_minutes > limit_minutes:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "daily_capacity_exceeded",
+                    "target_date": target_day.isoformat(),
+                    "planned_minutes": planned_minutes,
+                    "limit_minutes": limit_minutes,
+                    "subtask_id": subtask_id,
+                },
+            )
+
     updated = _update_row("subtasks", {"id": f"eq.{subtask_id}", "event_id": f"eq.{event_id}"}, data) if data else None
     return updated or current
 
