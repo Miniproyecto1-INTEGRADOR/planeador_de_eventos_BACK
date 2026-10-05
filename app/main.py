@@ -358,10 +358,8 @@ def set_daily_limit(user_id: str, value: int):
 def health_check():
     return {
         "status": "ok",
-        "database": "connected",
-        "message": "Data API de Supabase conectada",
-        "events_count": len(_get_rows("events", select="id")),
-        "subtasks_count": len(_get_rows("subtasks", select="id")),
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY),
+        "message": "API disponible",
     }
 
 

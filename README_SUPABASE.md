@@ -21,3 +21,14 @@ Desde `back`:
 ```
 
 API docs: `http://127.0.0.1:8000/docs`. El frontend corre en `http://127.0.0.1:5173`.
+
+## Desplegar junto al frontend en Vercel
+
+El frontend y la API deben ser proyectos separados de Vercel, aunque usen el mismo repositorio:
+
+1. En Vercel, importa otra vez el repositorio y crea un proyecto para la API. En **Root Directory**, selecciona `planeador_de_eventos_BACK`. Vercel detecta FastAPI desde `app/main.py` y sus dependencias en `requirements.txt`.
+2. En **Settings > Environment Variables** de ese proyecto, configura `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY`. Usa la URL del proyecto Supabase y una clave publicable vigente. El `.env` local no se despliega; no configures `DATABASE_URL` ni `SUPABASE_SERVICE_ROLE_KEY`.
+3. Despliega el proyecto y comprueba `https://<dominio-de-la-api>/api/health/`. Debe devolver JSON, no el HTML del frontend.
+4. En el proyecto Vercel del frontend, configura `VITE_API_URL` con el dominio base de la API, por ejemplo `https://<dominio-de-la-api>` (sin `/api`). Vuelve a desplegar el frontend para que Vite incorpore esa variable.
+
+El backend ya permite solicitudes desde `https://planeador-de-eventos-fronted.vercel.app`. Si el dominio del frontend cambia, añade su origen a `CORS_ORIGINS` en el proyecto de la API.
