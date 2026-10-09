@@ -216,7 +216,7 @@ def _daily_capacity_conflict(
     limit_minutes = 360 if profile is None or profile.get("daily_limit_minutes") is None else int(profile["daily_limit_minutes"])
     tasks_for_day = _get_rows(
         "subtasks",
-        {"target_date": f"eq.{target_day.isoformat()}", "status": "neq.done"},
+        {"target_date": f"eq.{target_day.isoformat()}", "status": "eq.pending"},
         "id,estimated_minutes",
     )
     planned_minutes = sum(
@@ -279,6 +279,7 @@ class SubtaskUpdate(BaseModel):
     target_date: str | None = None
     estimated_minutes: int | None = None
     status: str | None = None
+    postponed_note: str | None = Field(default=None, max_length=500)
 
 
 class UserCreate(BaseModel):
@@ -314,6 +315,7 @@ class SubtaskOut(BaseModel):
     target_date: str | None = None
     estimated_minutes: int
     status: str = "pending"
+    postponed_note: str | None = None
     created_at: datetime
 
 
@@ -408,8 +410,8 @@ def set_daily_limit(user_id: str, value: int):
 
     today_subtasks = _get_rows(
         "subtasks",
-        {"target_date": f"eq.{today}", "status": "neq.done"},
-        "id,event_id,title,target_date,estimated_minutes",
+            {"target_date": f"eq.{today}", "status": "eq.pending"},
+            "id,event_id,title,target_date,estimated_minutes,status",
     )
     planned_minutes = sum(int(subtask.get("estimated_minutes") or 0) for subtask in today_subtasks)
     if planned_minutes > requested_limit_minutes:
@@ -546,7 +548,7 @@ def create_event_plan(plan: EventPlanCreate):
             target_day = _validate_subtask_date(subtask.target_date, event["event_date"])
             status = _normalize_status(subtask.status)
             subtask_id = str(uuid.uuid4())
-            if status != "done":
+            if status == "pending":
                 conflict = _daily_capacity_conflict(
                     event.get("user_id"),
                     target_day,
@@ -652,7 +654,7 @@ def create_subtask(event_id: str, subtask: SubtaskCreate):
         raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")
     status = _normalize_status(subtask.status)
     subtask_id = str(uuid.uuid4())
-    if status != "done":
+    if status == "pending":
         conflict = _daily_capacity_conflict(
             event.get("user_id"),
             target_day,
@@ -726,6 +728,14 @@ def update_subtask(event_id: str, subtask_id: str, changes: SubtaskUpdate):
         raise HTTPException(status_code=400, detail="Los minutos estimados deben ser mayores que 0.")
     if "status" in data:
         data["status"] = _normalize_status(data["status"])
+    if "postponed_note" in data:
+        note = data["postponed_note"]
+        data["postponed_note"] = note.strip() or None if note is not None else None
+        effective_status = data.get("status", current.get("status", "pending"))
+        if data["postponed_note"] and effective_status != "postponed":
+            raise HTTPException(status_code=400, detail="La nota solo se puede guardar en una gestión pospuesta.")
+    if data.get("status") in {"pending", "done"} and current.get("postponed_note") is not None:
+        data["postponed_note"] = None
 
     target_day = _coerce_date(data.get("target_date", current.get("target_date")))
     if "target_date" in data:
@@ -735,7 +745,7 @@ def update_subtask(event_id: str, subtask_id: str, changes: SubtaskUpdate):
     estimated_minutes = data.get("estimated_minutes", current.get("estimated_minutes"))
     status = data.get("status", current.get("status", "pending"))
     schedule_changed = any(field in data for field in ("target_date", "estimated_minutes", "status"))
-    if schedule_changed and target_day is not None and status != "done":
+    if schedule_changed and target_day is not None and status == "pending":
         conflict = _daily_capacity_conflict(
             event.get("user_id"),
             target_day,

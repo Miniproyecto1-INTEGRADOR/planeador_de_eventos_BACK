@@ -133,6 +133,122 @@ def test_daily_limit_stays_blocked_when_current_limit_is_already_too_low(monkeyp
     assert updates == []
 
 
+def test_daily_capacity_only_counts_pending_subtasks(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: {'daily_limit_minutes': 240})
+
+    def fake_get_rows(table, filters=None, select='*'):
+        captured.update(filters or {})
+        return []
+
+    monkeypatch.setattr(api_module, '_get_rows', fake_get_rows)
+
+    conflict = api_module._daily_capacity_conflict(
+        '11111111-1111-1111-1111-111111111111',
+        date.today(),
+        30,
+        'new-subtask',
+    )
+
+    assert conflict is None
+    assert captured['status'] == 'eq.pending'
+
+
+def test_postponed_note_is_persisted_and_cleared_when_reactivated(monkeypatch):
+    today = date.today().isoformat()
+    subtask = {
+        'id': 'subtask-1',
+        'event_id': 'event-1',
+        'title': 'Confirmar salón',
+        'target_date': today,
+        'estimated_minutes': 60,
+        'status': 'pending',
+        'postponed_note': None,
+        'created_at': '2026-10-01T12:00:00Z',
+    }
+    event = {
+        'id': 'event-1',
+        'event_date': (date.today() + timedelta(days=7)).isoformat(),
+        'user_id': '11111111-1111-1111-1111-111111111111',
+    }
+    updates = []
+
+    def fake_get_row(table, filters, select='*'):
+        return subtask if table == 'subtasks' else event
+
+    def fake_update_row(table, filters, payload):
+        updates.append(payload.copy())
+        subtask.update(payload)
+        return subtask.copy()
+
+    monkeypatch.setattr(api_module, '_get_row', fake_get_row)
+    monkeypatch.setattr(api_module, '_get_rows', lambda *args, **kwargs: [])
+    monkeypatch.setattr(api_module, '_update_row', fake_update_row)
+
+    postponed_response = client.patch(
+        '/api/eventos/event-1/subtareas/subtask-1',
+        json={'status': 'postponed', 'postponed_note': '  Esperando confirmación del salón  '},
+    )
+    pending_response = client.patch(
+        '/api/eventos/event-1/subtareas/subtask-1',
+        json={'status': 'pending'},
+    )
+
+    assert postponed_response.status_code == 200
+    assert postponed_response.json()['postponed_note'] == 'Esperando confirmación del salón'
+    assert pending_response.status_code == 200
+    assert pending_response.json()['postponed_note'] is None
+    assert updates == [
+        {'status': 'postponed', 'postponed_note': 'Esperando confirmación del salón'},
+        {'status': 'pending', 'postponed_note': None},
+    ]
+
+
+def test_marking_subtask_done_without_existing_note_does_not_write_note_column(monkeypatch):
+    subtask = {
+        'id': 'subtask-1',
+        'event_id': 'event-1',
+        'title': 'Confirmar salón',
+        'target_date': date.today().isoformat(),
+        'estimated_minutes': 60,
+        'status': 'pending',
+        'created_at': '2026-10-01T12:00:00Z',
+    }
+    event = {
+        'id': 'event-1',
+        'event_date': (date.today() + timedelta(days=7)).isoformat(),
+        'user_id': '11111111-1111-1111-1111-111111111111',
+    }
+    updates = []
+
+    monkeypatch.setattr(api_module, '_get_row', lambda table, filters, select='*': subtask if table == 'subtasks' else event)
+    monkeypatch.setattr(api_module, '_update_row', lambda table, filters, payload: updates.append(payload.copy()) or {**subtask, **payload})
+
+    response = client.patch('/api/eventos/event-1/subtareas/subtask-1', json={'status': 'done'})
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'done'
+    assert updates == [{'status': 'done'}]
+
+
+def test_event_progress_reports_exact_completion_percentage(monkeypatch):
+    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: {'id': 'event-1'})
+    monkeypatch.setattr(
+        api_module,
+        '_get_rows',
+        lambda *args, **kwargs: [
+            {'id': 'one', 'status': 'done'},
+            {'id': 'two', 'status': 'done'},
+            {'id': 'three', 'status': 'pending'},
+        ],
+    )
+
+    response = client.get('/api/eventos/event-1/progreso')
+
+    assert response.status_code == 200
+    assert response.json() == {'event_id': 'event-1', 'total': 3, 'done': 2, 'percent': 66.67}
+
+
 def test_create_event_and_subtasks():
     event_response = client.post(
         '/api/eventos/',

@@ -56,6 +56,8 @@ drop function if exists public.register_app_user(text, text, text, text);
 alter table public.users enable row level security;
 alter table public.events enable row level security;
 alter table public.subtasks enable row level security;
+alter table public.subtasks add column if not exists postponed_note text;
+notify pgrst, 'reload schema';
 
 revoke all on table public.users, public.events, public.subtasks from anon;
 revoke all on table public.users from authenticated;
