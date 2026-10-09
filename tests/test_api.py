@@ -32,6 +32,8 @@ def test_daily_limit_update_persists_minutes_and_rejects_out_of_range(monkeypatc
         updates.append((table, filters, payload))
         return payload
 
+    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: {'daily_limit_minutes': 360})
+    monkeypatch.setattr(api_module, '_get_rows', lambda *args, **kwargs: [])
     monkeypatch.setattr(api_module, '_update_row', fake_update_row)
 
     response = client.put('/api/usuarios/11111111-1111-1111-1111-111111111111/limite', params={'value': 4})
@@ -50,11 +52,85 @@ def test_daily_limit_update_persists_minutes_and_rejects_out_of_range(monkeypatc
 
 
 def test_daily_limit_update_reports_missing_profile(monkeypatch):
+    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: None)
+    monkeypatch.setattr(api_module, '_get_rows', lambda *args, **kwargs: [])
     monkeypatch.setattr(api_module, '_update_row', lambda *args, **kwargs: None)
 
     response = client.put('/api/usuarios/11111111-1111-1111-1111-111111111111/limite', params={'value': 4})
 
     assert response.status_code == 404
+
+
+def test_daily_limit_cannot_be_reduced_below_todays_planned_load(monkeypatch):
+    today = api_module.date.today().isoformat()
+    updates = []
+    subtasks = [
+        {
+            'id': 'subtask-1',
+            'event_id': 'event-1',
+            'title': 'Preparar decoración',
+            'target_date': today,
+            'estimated_minutes': 180,
+        },
+        {
+            'id': 'subtask-2',
+            'event_id': 'event-2',
+            'title': 'Confirmar proveedor',
+            'target_date': today,
+            'estimated_minutes': 120,
+        },
+    ]
+
+    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: {'daily_limit_minutes': 360})
+    monkeypatch.setattr(api_module, '_get_rows', lambda *args, **kwargs: subtasks)
+    monkeypatch.setattr(
+        api_module,
+        '_update_row',
+        lambda *args, **kwargs: updates.append(args) or kwargs.get('payload'),
+    )
+
+    response = client.put(
+        '/api/usuarios/11111111-1111-1111-1111-111111111111/limite',
+        params={'value': 4},
+    )
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == {
+        'code': 'daily_capacity_exceeded',
+        'conflict_type': 'daily_limit_reduction',
+        'target_date': today,
+        'planned_minutes': 300,
+        'limit_minutes': 240,
+        'current_limit_minutes': 360,
+        'subtasks': subtasks,
+    }
+    assert updates == []
+
+
+def test_daily_limit_stays_blocked_when_current_limit_is_already_too_low(monkeypatch):
+    today = api_module.date.today().isoformat()
+    updates = []
+    subtasks = [{
+        'id': 'subtask-1',
+        'event_id': 'event-1',
+        'title': 'Preparar decoración',
+        'target_date': today,
+        'estimated_minutes': 240,
+    }]
+
+    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: {'daily_limit_minutes': 120})
+    monkeypatch.setattr(api_module, '_get_rows', lambda *args, **kwargs: subtasks)
+    monkeypatch.setattr(api_module, '_update_row', lambda *args, **kwargs: updates.append(args))
+
+    response = client.put(
+        '/api/usuarios/11111111-1111-1111-1111-111111111111/limite',
+        params={'value': 3},
+    )
+
+    assert response.status_code == 409
+    assert response.json()['detail']['planned_minutes'] == 240
+    assert response.json()['detail']['limit_minutes'] == 180
+    assert updates == []
 
 
 def test_create_event_and_subtasks():

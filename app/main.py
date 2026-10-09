@@ -401,10 +401,35 @@ def get_daily_limit(user_id: str):
 def set_daily_limit(user_id: str, value: int):
     if value < 1 or value > 16:
         raise HTTPException(status_code=400, detail="El límite diario debe estar entre 1 y 16 horas.")
+    profile = _get_row("users", {"id": f"eq.{user_id}"}, "daily_limit_minutes")
+    current_limit_minutes = 360 if profile is None or profile.get("daily_limit_minutes") is None else int(profile["daily_limit_minutes"])
+    requested_limit_minutes = value * 60
+    today = date.today().isoformat()
+
+    today_subtasks = _get_rows(
+        "subtasks",
+        {"target_date": f"eq.{today}", "status": "neq.done"},
+        "id,event_id,title,target_date,estimated_minutes",
+    )
+    planned_minutes = sum(int(subtask.get("estimated_minutes") or 0) for subtask in today_subtasks)
+    if planned_minutes > requested_limit_minutes:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "daily_capacity_exceeded",
+                "conflict_type": "daily_limit_reduction",
+                "target_date": today,
+                "planned_minutes": planned_minutes,
+                "limit_minutes": requested_limit_minutes,
+                "current_limit_minutes": current_limit_minutes,
+                "subtasks": today_subtasks,
+            },
+        )
+
     updated = _update_row(
         "users",
         {"id": f"eq.{user_id}", "select": "id,daily_limit_minutes"},
-        {"daily_limit_minutes": value * 60},
+        {"daily_limit_minutes": requested_limit_minutes},
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="No encontramos el perfil del organizador para guardar el límite.")
