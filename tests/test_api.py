@@ -7,6 +7,7 @@ from app.main import app
 
 
 client = TestClient(app)
+app.dependency_overrides[api_module.require_bearer_token] = lambda: "test-token"
 
 
 def test_health_endpoint():
@@ -14,6 +15,24 @@ def test_health_endpoint():
     assert response.status_code == 200
     payload = response.json()
     assert payload['status'] in {'ok', 'degraded'}
+
+
+def test_private_routes_require_bearer_and_openapi_exposes_authorize():
+    auth_override = app.dependency_overrides.pop(api_module.require_bearer_token)
+    try:
+        response = TestClient(app).get('/api/eventos/')
+    finally:
+        app.dependency_overrides[api_module.require_bearer_token] = auth_override
+    openapi = app.openapi()
+
+    assert response.status_code == 401
+    assert openapi['components']['securitySchemes']['HTTPBearer'] == {
+        'type': 'http',
+        'scheme': 'bearer',
+    }
+    assert {'HTTPBearer': []} in openapi['paths']['/api/eventos/']['get']['security']
+    assert 'security' not in openapi['paths']['/api/health/']['get']
+    assert 'security' not in openapi['paths']['/api/login/']['post']
 
 
 def test_daily_limit_defaults_to_six_hours(monkeypatch):

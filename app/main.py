@@ -10,10 +10,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 load_dotenv()
@@ -42,6 +43,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+security = HTTPBearer(auto_error=False)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -58,6 +60,18 @@ async def forward_supabase_session(request: Request, call_next):
         return await call_next(request)
     finally:
         SUPABASE_ACCESS_TOKEN.reset(token)
+
+
+def require_bearer_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> str:
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Se requiere un token de acceso Bearer.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials.credentials
 
 
 @app.get("/", include_in_schema=False)
@@ -372,6 +386,7 @@ def register_user(user: UserCreate):
 
 @app.get(
     "/api/usuarios/{user_id}/limite",
+    dependencies=[Depends(require_bearer_token)],
     summary="Consultar el límite diario de gestión",
     description="Devuelve las horas del organizador autenticado. Si no configuró un valor, devuelve el valor predeterminado de 6 horas.",
     responses={
@@ -389,6 +404,7 @@ def get_daily_limit(user_id: str):
 
 @app.put(
     "/api/usuarios/{user_id}/limite",
+    dependencies=[Depends(require_bearer_token)],
     summary="Actualizar el límite diario de gestión",
     description="Guarda el límite por organizador. El valor `value` se envía como query parameter y debe ser un entero entre 1 y 16.",
     responses={
@@ -449,6 +465,7 @@ def health_check():
 
 @app.get(
     "/api/hoy/",
+    dependencies=[Depends(require_bearer_token)],
     summary="Consultar gestiones agrupadas para Hoy",
     description=(
         "Devuelve gestiones agrupadas en vencidas, hoy y próximas. Requiere el token de acceso "
@@ -506,13 +523,13 @@ def today_summary(
     return groups
 
 
-@app.get("/api/eventos/", response_model=list[EventOut])
+@app.get("/api/eventos/", response_model=list[EventOut], dependencies=[Depends(require_bearer_token)])
 def list_eventos():
     return _get_rows("events", {"order": "event_date.asc"})
 
 
-@app.get("/api/eventos/{event_id}", response_model=EventOut)
-@app.get("/api/eventos/{event_id}/", response_model=EventOut)
+@app.get("/api/eventos/{event_id}", response_model=EventOut, dependencies=[Depends(require_bearer_token)])
+@app.get("/api/eventos/{event_id}/", response_model=EventOut, dependencies=[Depends(require_bearer_token)])
 def get_event(event_id: str):
     event = _get_row("events", {"id": f"eq.{event_id}"})
     if not event:
@@ -520,7 +537,7 @@ def get_event(event_id: str):
     return event
 
 
-@app.get("/api/eventos/{event_id}/progreso")
+@app.get("/api/eventos/{event_id}/progreso", dependencies=[Depends(require_bearer_token)])
 def get_event_progress(event_id: str):
     if not _get_row("events", {"id": f"eq.{event_id}"}, "id"):
         raise HTTPException(status_code=404, detail=EVENT_NOT_FOUND)
@@ -530,12 +547,12 @@ def get_event_progress(event_id: str):
     return {"event_id": event_id, "total": total, "done": done, "percent": 0 if total == 0 else round(done / total * 100, 2)}
 
 
-@app.post("/api/eventos/", response_model=EventOut, status_code=201)
+@app.post("/api/eventos/", response_model=EventOut, status_code=201, dependencies=[Depends(require_bearer_token)])
 def create_evento(evento: EventCreate):
     return _insert_row("events", _create_event_payload(evento))
 
 
-@app.post("/api/eventos/plan-inicial/", status_code=201)
+@app.post("/api/eventos/plan-inicial/", status_code=201, dependencies=[Depends(require_bearer_token)])
 def create_event_plan(plan: EventPlanCreate):
     event = _insert_row("events", _create_event_payload(EventCreate(**plan.model_dump(exclude={"subtasks"}))))
     created_subtasks = []
@@ -580,7 +597,7 @@ def create_event_plan(plan: EventPlanCreate):
     return {"event": event, "subtasks": created_subtasks}
 
 
-@app.patch("/api/eventos/{event_id}", response_model=EventOut)
+@app.patch("/api/eventos/{event_id}", response_model=EventOut, dependencies=[Depends(require_bearer_token)])
 def update_event(event_id: str, changes: EventUpdate):
     current = _get_row("events", {"id": f"eq.{event_id}"})
     if not current:
@@ -608,7 +625,7 @@ def update_event(event_id: str, changes: EventUpdate):
     return updated or current
 
 
-@app.delete("/api/eventos/{event_id}")
+@app.delete("/api/eventos/{event_id}", dependencies=[Depends(require_bearer_token)])
 def delete_event(event_id: str):
     event = _get_row("events", {"id": f"eq.{event_id}"}, "id")
     if not event:
@@ -620,6 +637,7 @@ def delete_event(event_id: str):
 
 @app.post(
     "/api/eventos/{event_id}/subtareas/",
+    dependencies=[Depends(require_bearer_token)],
     response_model=SubtaskOut,
     status_code=201,
     summary="Crear una gestión logística",
@@ -677,7 +695,7 @@ def create_subtask(event_id: str, subtask: SubtaskCreate):
     return _insert_row("subtasks", payload)
 
 
-@app.get("/api/eventos/{event_id}/subtareas/", response_model=list[SubtaskOut])
+@app.get("/api/eventos/{event_id}/subtareas/", response_model=list[SubtaskOut], dependencies=[Depends(require_bearer_token)])
 def list_subtasks(event_id: str):
     if not _get_row("events", {"id": f"eq.{event_id}"}, "id"):
         raise HTTPException(status_code=404, detail=EVENT_NOT_FOUND)
@@ -686,6 +704,7 @@ def list_subtasks(event_id: str):
 
 @app.patch(
     "/api/eventos/{event_id}/subtareas/{subtask_id}",
+    dependencies=[Depends(require_bearer_token)],
     response_model=SubtaskOut,
     summary="Actualizar o reprogramar una gestión",
     description=(
@@ -759,7 +778,7 @@ def update_subtask(event_id: str, subtask_id: str, changes: SubtaskUpdate):
     return updated or current
 
 
-@app.delete("/api/eventos/{event_id}/subtareas/{subtask_id}")
+@app.delete("/api/eventos/{event_id}/subtareas/{subtask_id}", dependencies=[Depends(require_bearer_token)])
 def delete_subtask(event_id: str, subtask_id: str):
     deleted = _delete_rows("subtasks", {"id": f"eq.{subtask_id}", "event_id": f"eq.{event_id}"})
     if not deleted:
