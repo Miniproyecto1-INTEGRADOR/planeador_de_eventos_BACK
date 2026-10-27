@@ -307,6 +307,8 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class PasswordRecoveryRequest(BaseModel):
+    email: str
 
 class EventOut(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -383,6 +385,28 @@ def register_user(user: UserCreate):
         "needs_email_confirmation": not bool(response.get("access_token")),
     }
 
+@app.post("/api/recuperar-contrasena/")
+def request_password_recovery(data: PasswordRecoveryRequest):
+    email = data.email.strip().lower()
+
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        "https://planeador-de-eventos-fronted.vercel.app",
+    ).rstrip("/")
+
+    redirect_url = f"{frontend_url}/restablecer-contrasena"
+
+    _supabase_auth_request(
+        f"/auth/v1/recover?{urllib.parse.urlencode({'redirect_to': redirect_url})}",
+        {"email": email},
+    )
+
+    return {
+        "message": (
+            "Si existe una cuenta asociada a ese correo, "
+            "recibirás instrucciones para recuperar tu contraseña."
+        )
+    }
 
 @app.get(
     "/api/usuarios/{user_id}/limite",
