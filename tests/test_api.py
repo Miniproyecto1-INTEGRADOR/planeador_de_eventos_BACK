@@ -553,7 +553,7 @@ def test_create_subtask_rejects_missing_or_later_target_date(monkeypatch):
     missing_response = client.post(f'/api/eventos/{event_id}/subtareas/', json=base_payload)
 
     assert future_response.status_code == 400
-    assert 'posterior a la fecha del evento' in future_response.json()['detail']
+    assert future_response.json()['detail'] == 'No se puede crear una subtarea luego de la fecha del evento.'
     assert missing_response.status_code == 400
     assert inserted_rows == []
 
@@ -619,7 +619,7 @@ def test_initial_plan_rejects_subtask_after_event_before_inserting_event(monkeyp
     )
 
     assert response.status_code == 400
-    assert 'posterior a la fecha del evento' in response.json()['detail']
+    assert response.json()['detail'] == 'No se puede crear una subtarea luego de la fecha del evento.'
     assert inserted_rows == []
     assert deleted_rows == []
 

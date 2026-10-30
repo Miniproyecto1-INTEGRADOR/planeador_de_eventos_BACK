@@ -245,7 +245,7 @@ def _validate_subtask_date(
     if target_day > event_day:
         raise HTTPException(
             status_code=400,
-            detail="La fecha límite de una subtarea no puede ser posterior a la fecha del evento.",
+            detail="No se puede crear una subtarea luego de la fecha del evento.",
         )
     return target_day
 
