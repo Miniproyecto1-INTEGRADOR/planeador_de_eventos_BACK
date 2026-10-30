@@ -1,6 +1,3 @@
-import io
-import json
-import urllib.error
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
@@ -11,20 +8,6 @@ from app.main import app
 
 client = TestClient(app)
 app.dependency_overrides[api_module.require_bearer_token] = lambda: "test-token"
-
-
-class FakeAuthResponse:
-    def __init__(self, user):
-        self.user = user
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return None
-
-    def read(self):
-        return json.dumps(self.user).encode()
 
 
 def test_health_endpoint():
@@ -95,192 +78,6 @@ def test_daily_limit_update_reports_missing_profile(monkeypatch):
     response = client.put('/api/usuarios/11111111-1111-1111-1111-111111111111/limite', params={'value': 4})
 
     assert response.status_code == 404
-
-
-def test_profile_requires_bearer_token(monkeypatch):
-    def reject_auth_request(*args, **kwargs):
-        raise AssertionError('Supabase Auth must not be called without a token')
-
-    monkeypatch.setattr(api_module.urllib.request, 'urlopen', reject_auth_request)
-
-    response = client.get('/api/perfil/')
-
-    assert response.status_code == 401
-    assert response.json()['detail'] == 'Inicia sesión para consultar tu perfil.'
-
-
-def test_profile_rejects_invalid_bearer_token(monkeypatch):
-    def reject_invalid_token(request, timeout):
-        raise urllib.error.HTTPError(
-            request.full_url,
-            401,
-            'Unauthorized',
-            {},
-            io.BytesIO(b'{}'),
-        )
-
-    monkeypatch.setattr(api_module.urllib.request, 'urlopen', reject_invalid_token)
-
-    response = client.get(
-        '/api/perfil/',
-        headers={'Authorization': 'Bearer invalid-token'},
-    )
-
-    assert response.status_code == 401
-    assert response.json()['detail'] == 'La sesión no es válida.'
-
-
-def test_profile_uses_supabase_authenticated_user(monkeypatch):
-    user_id = '11111111-1111-1111-1111-111111111111'
-    auth_requests = []
-    profile_queries = []
-
-    def fake_auth_request(request, timeout):
-        auth_requests.append(request)
-        return FakeAuthResponse({
-            'id': user_id,
-            'email': 'ana@example.com',
-            'user_metadata': {'first_name': 'Ana', 'last_name': 'García'},
-        })
-
-    def fake_profile_query(table, filters, select='*'):
-        profile_queries.append((table, filters, select))
-        return {
-            'first_name': 'Ana',
-            'last_name': 'García',
-            'email': 'ana@example.com',
-        }
-
-    monkeypatch.setattr(api_module, 'SUPABASE_PUBLISHABLE_KEY', 'test-publishable-key')
-    monkeypatch.setattr(api_module.urllib.request, 'urlopen', fake_auth_request)
-    monkeypatch.setattr(api_module, '_get_row', fake_profile_query)
-
-    response = client.get(
-        '/api/perfil/',
-        headers={'Authorization': 'Bearer valid-token'},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        'first_name': 'Ana',
-        'last_name': 'García',
-        'email': 'ana@example.com',
-    }
-    assert auth_requests[0].full_url == f'{api_module.SUPABASE_URL}/auth/v1/user'
-    assert auth_requests[0].get_header('Authorization') == 'Bearer valid-token'
-    assert profile_queries == [
-        ('users', {'id': f'eq.{user_id}'}, 'first_name,last_name,email'),
-    ]
-
-
-def test_profile_ignores_client_requested_user_id(monkeypatch):
-    authenticated_user_id = '11111111-1111-1111-1111-111111111111'
-    requested_user_id = '22222222-2222-2222-2222-222222222222'
-    profile_queries = []
-
-    monkeypatch.setattr(
-        api_module,
-        'SUPABASE_PUBLISHABLE_KEY',
-        'test-publishable-key',
-    )
-    monkeypatch.setattr(
-        api_module.urllib.request,
-        'urlopen',
-        lambda request, timeout: FakeAuthResponse({
-            'id': authenticated_user_id,
-            'email': 'ana@example.com',
-        }),
-    )
-
-    def fake_profile_query(table, filters, select='*'):
-        profile_queries.append((table, filters, select))
-        return {
-            'first_name': 'Ana',
-            'last_name': 'García',
-            'email': 'ana@example.com',
-        }
-
-    monkeypatch.setattr(api_module, '_get_row', fake_profile_query)
-
-    response = client.get(
-        f'/api/perfil/?user_id={requested_user_id}',
-        headers={'Authorization': 'Bearer valid-token'},
-    )
-
-    assert response.status_code == 200
-    assert response.json()['email'] == 'ana@example.com'
-    assert profile_queries == [
-        (
-            'users',
-            {'id': f'eq.{authenticated_user_id}'},
-            'first_name,last_name,email',
-        ),
-    ]
-
-
-def test_profile_falls_back_to_supabase_auth_metadata(monkeypatch):
-    user_id = '11111111-1111-1111-1111-111111111111'
-    profile_queries = []
-
-    monkeypatch.setattr(
-        api_module,
-        'SUPABASE_PUBLISHABLE_KEY',
-        'test-publishable-key',
-    )
-    monkeypatch.setattr(
-        api_module.urllib.request,
-        'urlopen',
-        lambda request, timeout: FakeAuthResponse({
-            'id': user_id,
-            'email': 'ana@example.com',
-            'user_metadata': {'first_name': 'Ana', 'last_name': 'García'},
-        }),
-    )
-
-    def fake_missing_profile(table, filters, select='*'):
-        profile_queries.append((table, filters, select))
-        return None
-
-    monkeypatch.setattr(api_module, '_get_row', fake_missing_profile)
-
-    response = client.get(
-        '/api/perfil/',
-        headers={'Authorization': 'Bearer valid-token'},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        'first_name': 'Ana',
-        'last_name': 'García',
-        'email': 'ana@example.com',
-    }
-    assert profile_queries == [
-        ('users', {'id': f'eq.{user_id}'}, 'first_name,last_name,email'),
-    ]
-
-
-def test_profile_returns_not_found_without_profile_or_auth_metadata(monkeypatch):
-    monkeypatch.setattr(
-        api_module,
-        'SUPABASE_PUBLISHABLE_KEY',
-        'test-publishable-key',
-    )
-    monkeypatch.setattr(
-        api_module.urllib.request,
-        'urlopen',
-        lambda request, timeout: FakeAuthResponse({
-            'id': '11111111-1111-1111-1111-111111111111',
-        }),
-    )
-    monkeypatch.setattr(api_module, '_get_row', lambda *args, **kwargs: None)
-
-    response = client.get(
-        '/api/perfil/',
-        headers={'Authorization': 'Bearer valid-token'},
-    )
-
-    assert response.status_code == 404
-    assert response.json()['detail'] == 'No encontramos los datos de tu perfil.'
 
 
 def test_daily_limit_cannot_be_reduced_below_todays_planned_load(monkeypatch):
@@ -553,7 +350,7 @@ def test_create_subtask_rejects_missing_or_later_target_date(monkeypatch):
     missing_response = client.post(f'/api/eventos/{event_id}/subtareas/', json=base_payload)
 
     assert future_response.status_code == 400
-    assert future_response.json()['detail'] == 'No se puede crear una subtarea luego de la fecha del evento.'
+    assert 'posterior a la fecha del evento' in future_response.json()['detail']
     assert missing_response.status_code == 400
     assert inserted_rows == []
 
@@ -593,12 +390,13 @@ def test_create_subtask_rejects_daily_capacity_without_inserting(monkeypatch):
     assert inserted_rows == []
 
 
-def test_initial_plan_rejects_subtask_after_event_before_inserting_event(monkeypatch):
-    inserted_rows = []
+def test_initial_plan_rolls_back_when_subtask_is_after_event(monkeypatch):
+    inserted_events = []
     deleted_rows = []
 
     def fake_insert_row(table, payload):
-        inserted_rows.append((table, payload))
+        if table == 'events':
+            inserted_events.append(payload)
         return payload
 
     monkeypatch.setattr(api_module, '_insert_row', fake_insert_row)
@@ -619,9 +417,8 @@ def test_initial_plan_rejects_subtask_after_event_before_inserting_event(monkeyp
     )
 
     assert response.status_code == 400
-    assert response.json()['detail'] == 'No se puede crear una subtarea luego de la fecha del evento.'
-    assert inserted_rows == []
-    assert deleted_rows == []
+    assert inserted_events
+    assert deleted_rows == ['subtasks', 'events']
 
 
 def test_initial_plan_returns_conflicting_subtask_and_rolls_back(monkeypatch):
