@@ -593,13 +593,12 @@ def test_create_subtask_rejects_daily_capacity_without_inserting(monkeypatch):
     assert inserted_rows == []
 
 
-def test_initial_plan_rolls_back_when_subtask_is_after_event(monkeypatch):
-    inserted_events = []
+def test_initial_plan_rejects_subtask_after_event_before_inserting_event(monkeypatch):
+    inserted_rows = []
     deleted_rows = []
 
     def fake_insert_row(table, payload):
-        if table == 'events':
-            inserted_events.append(payload)
+        inserted_rows.append((table, payload))
         return payload
 
     monkeypatch.setattr(api_module, '_insert_row', fake_insert_row)
@@ -620,8 +619,9 @@ def test_initial_plan_rolls_back_when_subtask_is_after_event(monkeypatch):
     )
 
     assert response.status_code == 400
-    assert inserted_events
-    assert deleted_rows == ['subtasks', 'events']
+    assert 'posterior a la fecha del evento' in response.json()['detail']
+    assert inserted_rows == []
+    assert deleted_rows == []
 
 
 def test_initial_plan_returns_conflicting_subtask_and_rolls_back(monkeypatch):

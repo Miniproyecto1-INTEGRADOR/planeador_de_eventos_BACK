@@ -641,17 +641,21 @@ def create_evento(evento: EventCreate):
 
 @app.post("/api/eventos/plan-inicial/", status_code=201, dependencies=[Depends(require_bearer_token)])
 def create_event_plan(plan: EventPlanCreate):
-    event = _insert_row("events", _create_event_payload(EventCreate(**plan.model_dump(exclude={"subtasks"}))))
+    event_payload = _create_event_payload(EventCreate(**plan.model_dump(exclude={"subtasks"})))
+    validated_subtasks = []
+    for subtask_index, subtask in enumerate(plan.subtasks):
+        title = subtask.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")
+        target_day = _validate_subtask_date(subtask.target_date, event_payload["event_date"])
+        status = _normalize_status(subtask.status)
+        validated_subtasks.append((subtask_index, subtask, title, target_day, status, str(uuid.uuid4())))
+
+    event = _insert_row("events", event_payload)
     created_subtasks = []
 
     try:
-        for subtask_index, subtask in enumerate(plan.subtasks):
-            title = subtask.title.strip()
-            if not title:
-                raise HTTPException(status_code=400, detail="El título de la gestión logística es obligatorio.")
-            target_day = _validate_subtask_date(subtask.target_date, event["event_date"])
-            status = _normalize_status(subtask.status)
-            subtask_id = str(uuid.uuid4())
+        for subtask_index, subtask, title, target_day, status, subtask_id in validated_subtasks:
             if status == "pending":
                 conflict = _daily_capacity_conflict(
                     event.get("user_id"),
