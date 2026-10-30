@@ -399,7 +399,22 @@ def get_profile(access_token: str = Depends(require_bearer_token)):
     email = user.get("email")
     if not isinstance(email, str) or not email.strip():
         raise HTTPException(status_code=502, detail="Supabase no devolvió el correo del usuario.")
-    return {"email": email}
+    user_metadata = user.get("user_metadata")
+    if not isinstance(user_metadata, dict):
+        user_metadata = {}
+    first_name = user_metadata.get("first_name")
+    last_name = user_metadata.get("last_name")
+    full_name = " ".join(
+        value.strip()
+        for value in (first_name, last_name)
+        if isinstance(value, str) and value.strip()
+    )
+    return {
+        "first_name": first_name.strip() if isinstance(first_name, str) else "",
+        "last_name": last_name.strip() if isinstance(last_name, str) else "",
+        "email": email,
+        "full_name": full_name,
+    }
 
 
 @app.post("/api/registro/", status_code=201)

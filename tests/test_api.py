@@ -41,14 +41,36 @@ def test_profile_returns_email_from_authenticated_supabase_user(monkeypatch):
     monkeypatch.setattr(
         api_module,
         '_supabase_auth_user',
-        lambda token: received_tokens.append(token) or {'email': 'user@example.com'},
+        lambda token: received_tokens.append(token) or {
+            'email': 'user@example.com',
+            'user_metadata': {'first_name': 'Ana', 'last_name': 'García'},
+        },
     )
 
     response = client.get('/api/perfil/')
 
     assert response.status_code == 200
-    assert response.json() == {'email': 'user@example.com'}
+    assert response.json() == {
+        'first_name': 'Ana',
+        'last_name': 'García',
+        'email': 'user@example.com',
+        'full_name': 'Ana García',
+    }
     assert received_tokens == ['test-token']
+
+
+def test_profile_works_when_auth_user_has_no_name_metadata(monkeypatch):
+    monkeypatch.setattr(api_module, '_supabase_auth_user', lambda token: {'email': 'user@example.com'})
+
+    response = client.get('/api/perfil/')
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'first_name': '',
+        'last_name': '',
+        'email': 'user@example.com',
+        'full_name': '',
+    }
 
 
 def test_daily_limit_defaults_to_six_hours(monkeypatch):
