@@ -179,6 +179,37 @@ def _supabase_auth_request(path: str, payload: dict[str, Any]) -> dict[str, Any]
         raise HTTPException(status_code=503, detail="No fue posible contactar Supabase Auth.") from exc
 
 
+def _get_authenticated_user() -> dict[str, Any]:
+    authorization = SUPABASE_ACCESS_TOKEN.get()
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Inicia sesión para consultar tu perfil.")
+    if not SUPABASE_URL or not SUPABASE_PUBLISHABLE_KEY:
+        raise HTTPException(status_code=503, detail="Configura SUPABASE_URL y SUPABASE_PUBLISHABLE_KEY en back/.env.")
+
+    request = urllib.request.Request(
+        f"{SUPABASE_URL}/auth/v1/user",
+        method="GET",
+        headers={
+            "apikey": SUPABASE_PUBLISHABLE_KEY,
+            "Authorization": authorization,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            user = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        status_code = 401 if exc.code in (400, 401, 403) else exc.code
+        detail = "La sesión no es válida." if status_code == 401 else "Supabase Auth rechazó la solicitud."
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail="No fue posible contactar Supabase Auth.") from exc
+
+    if not isinstance(user, dict) or not user.get("id"):
+        raise HTTPException(status_code=401, detail="La sesión no es válida.")
+    return user
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=400, content={"detail": exc.errors()})
@@ -201,7 +232,10 @@ def _coerce_date(value: str | date | datetime | None) -> date | None:
         raise HTTPException(status_code=400, detail="La fecha no tiene un formato válido.") from exc
 
 
-def _validate_subtask_date(target_date: str | date | datetime | None, event_date: str | date | datetime) -> date:
+def _validate_subtask_date(
+    target_date: str | date | datetime | None,
+    event_date: str | date | datetime,
+) -> date:
     target_day = _coerce_date(target_date)
     event_day = _coerce_date(event_date)
     if target_day is None:
@@ -209,7 +243,10 @@ def _validate_subtask_date(target_date: str | date | datetime | None, event_date
     if event_day is None:
         raise HTTPException(status_code=400, detail="La fecha del evento no es válida.")
     if target_day > event_day:
-        raise HTTPException(status_code=400, detail="La fecha límite de una subtarea no puede ser posterior a la fecha del evento.")
+        raise HTTPException(
+            status_code=400,
+            detail="La fecha límite de una subtarea no puede ser posterior a la fecha del evento.",
+        )
     return target_day
 
 
@@ -384,6 +421,32 @@ def register_user(user: UserCreate):
         "email": auth_user.get("email", email),
         "needs_email_confirmation": not bool(response.get("access_token")),
     }
+
+
+@app.get("/api/perfil/")
+def get_profile():
+    authenticated_user = _get_authenticated_user()
+    user_id = authenticated_user["id"]
+    user_metadata = authenticated_user.get("user_metadata") or {}
+    if not isinstance(user_metadata, dict):
+        user_metadata = {}
+    profile = _get_row(
+        "users",
+        {"id": f"eq.{user_id}"},
+        "first_name,last_name,email",
+    )
+    if profile is None and not (
+        user_metadata.get("first_name")
+        or user_metadata.get("last_name")
+        or authenticated_user.get("email")
+    ):
+        raise HTTPException(status_code=404, detail="No encontramos los datos de tu perfil.")
+    return {
+        "first_name": (profile or {}).get("first_name") or user_metadata.get("first_name"),
+        "last_name": (profile or {}).get("last_name") or user_metadata.get("last_name"),
+        "email": (profile or {}).get("email") or authenticated_user.get("email"),
+    }
+
 
 @app.post("/api/recuperar-contrasena/")
 def request_password_recovery(data: PasswordRecoveryRequest):
