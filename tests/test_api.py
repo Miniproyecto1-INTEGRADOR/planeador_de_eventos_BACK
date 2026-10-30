@@ -31,8 +31,24 @@ def test_private_routes_require_bearer_and_openapi_exposes_authorize():
         'scheme': 'bearer',
     }
     assert {'HTTPBearer': []} in openapi['paths']['/api/eventos/']['get']['security']
+    assert {'HTTPBearer': []} in openapi['paths']['/api/perfil/']['get']['security']
     assert 'security' not in openapi['paths']['/api/health/']['get']
     assert 'security' not in openapi['paths']['/api/login/']['post']
+
+
+def test_profile_returns_email_from_authenticated_supabase_user(monkeypatch):
+    received_tokens = []
+    monkeypatch.setattr(
+        api_module,
+        '_supabase_auth_user',
+        lambda token: received_tokens.append(token) or {'email': 'user@example.com'},
+    )
+
+    response = client.get('/api/perfil/')
+
+    assert response.status_code == 200
+    assert response.json() == {'email': 'user@example.com'}
+    assert received_tokens == ['test-token']
 
 
 def test_daily_limit_defaults_to_six_hours(monkeypatch):

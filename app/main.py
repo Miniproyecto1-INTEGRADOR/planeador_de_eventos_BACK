@@ -179,6 +179,35 @@ def _supabase_auth_request(path: str, payload: dict[str, Any]) -> dict[str, Any]
         raise HTTPException(status_code=503, detail="No fue posible contactar Supabase Auth.") from exc
 
 
+def _supabase_auth_user(access_token: str) -> dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_PUBLISHABLE_KEY:
+        raise HTTPException(status_code=503, detail="Configura Supabase para consultar el perfil.")
+    request = urllib.request.Request(
+        f"{SUPABASE_URL}/auth/v1/user",
+        method="GET",
+        headers={
+            "apikey": SUPABASE_PUBLISHABLE_KEY,
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            user = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 401):
+            raise HTTPException(status_code=401, detail="La sesión expiró. Inicia sesión de nuevo.") from exc
+        raise HTTPException(status_code=502, detail="No se pudo consultar el perfil en Supabase.") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail="No fue posible contactar Supabase Auth.") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="Supabase devolvió una respuesta de perfil no válida.") from exc
+
+    if not isinstance(user, dict):
+        raise HTTPException(status_code=502, detail="Supabase devolvió una respuesta de perfil no válida.")
+    return user
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=400, content={"detail": exc.errors()})
@@ -362,6 +391,15 @@ def login(credentials: LoginRequest):
     if not session.get("access_token") or not user.get("id"):
         raise HTTPException(status_code=401, detail="Credenciales inválidas.")
     return {"token": session["access_token"], "user_id": user["id"], "email": user.get("email", normalized_email)}
+
+
+@app.get("/api/perfil/")
+def get_profile(access_token: str = Depends(require_bearer_token)):
+    user = _supabase_auth_user(access_token)
+    email = user.get("email")
+    if not isinstance(email, str) or not email.strip():
+        raise HTTPException(status_code=502, detail="Supabase no devolvió el correo del usuario.")
+    return {"email": email}
 
 
 @app.post("/api/registro/", status_code=201)
